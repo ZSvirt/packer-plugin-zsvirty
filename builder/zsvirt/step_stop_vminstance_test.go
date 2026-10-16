@@ -86,7 +86,8 @@ func TestGuestShutdownErrorsDoNotFallBack(t *testing.T) {
 			c := &Config{ShutdownCommand: "shutdown", InstanceConfig: InstanceConfig{InstanceUuid: "vm"}}
 			d := &MockDriver{GetVmInstanceResult: &view.VmInstanceInventoryView{State: "Running"}}
 			state := testStateBag(c, d)
-			state.Put("communicator", &packersdk.MockCommunicator{})
+			comm := &packersdk.MockCommunicator{}
+			state.Put("communicator", comm)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			switch name {
@@ -99,6 +100,11 @@ func TestGuestShutdownErrorsDoNotFallBack(t *testing.T) {
 			}
 			assert.Equal(t, multistep.ActionHalt, (&StepStopVmInstance{}).Run(ctx, state))
 			assert.False(t, d.StopVminstanceCalled)
+			if name == "cancel" {
+				assert.False(t, comm.StartCalled, "canceled builds must not start a guest shutdown command")
+				assert.False(t, d.GetVmInstanceCalled)
+				assert.ErrorIs(t, state.Get("error").(error), context.Canceled)
+			}
 		})
 	}
 }

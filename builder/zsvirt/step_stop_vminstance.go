@@ -16,6 +16,10 @@ type StepStopVmInstance struct {
 }
 
 func (s *StepStopVmInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	if err := ctx.Err(); err != nil {
+		return halt(state, fmt.Errorf("stopping VM instance: %w", err))
+	}
+
 	ui := state.Get("ui").(packersdk.Ui)
 	config := state.Get("config").(*Config)
 	driver := stepDriver(ctx, state)
