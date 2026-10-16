@@ -1,0 +1,68 @@
+
+Type: `zsvirt-iso`
+
+Installs an operating system from ISO onto a blank root disk, provisions the installed guest and creates a ZSphere root-volume template. Use installer answer files over HTTP or an auxiliary CD to configure the OS, account and SSH/WinRM. Installation does not depend on ZSphere userdata or automatic cloud SSH-key injection.
+
+## Required configuration
+
+Use the authentication, networking, compute and backup-storage settings from the [ZSphere builder](/packer/integrations/ZSvirt/zsvirty/latest/components/builder/zsvirt), plus:
+
+| Setting | Purpose |
+| --- | --- |
+| `root_disk_offering_uuid` | Blank installation disk; choose sufficient capacity for the OS |
+| `image_uuid` or `source_image` | Existing Enabled/Ready ISO, selected by UUID or name |
+| `source_image_url` with `source_image` and `format = "iso"` | Alternative: let ZSphere download the installer to image storage |
+| `communicator` | `ssh` or `winrm`; `none` is not allowed |
+| Installation credential | SSH password/private key or WinRM credential configured by the answer file |
+| `installation_check_command` | Command that succeeds only in the installed OS; check an installation marker, expected OS and firmware |
+
+Also set the output `image_name` and build `instance_name`. Snapshot sources, `userdata` and `sshkey` are incompatible with ISO installation. The default `zsvirt` builder can also enable this mode with `iso_install = true`.
+
+## Firmware and answer files
+
+| Setting | Behavior |
+| --- | --- |
+| `boot_mode` | `Legacy` or `UEFI`; unset uses the image/cloud default. Applied to installer import and VM creation |
+| `http_directory` / `http_content` | Serve installer answer files through Packer's HTTP server; choose one source |
+| `http_ip` | Explicit reachable runner IP when automatic selection is unsuitable |
+| `http_bind_address`, `http_port_min`, `http_port_max` | HTTP listener address and port range |
+| `cd_files` / `cd_content` / `cd_label` | Generate an auxiliary answer ISO from local files/content and give it the installer's required label |
+| `boot_command` / `boot_wait` | Installer-specific VNC keys and initial delay |
+| `boot_key_interval` / `boot_keygroup_interval` | Delay between keys or key groups |
+
+Boot commands require access to the host's TCP VNC console. HTTP answers must be reachable from the guest. Generated answer CDs require a local ISO creation tool and a separate temporary HTTP publisher reachable by image storage; that publisher uses an automatically allocated port. Source URLs must also be reachable by ZSphere's image storage.
+
+The upstream ZStack test environment rejected imports below 1 MiB. The plugin automatically pads generated answer ISOs to at least 1 MiB with trailing zeros, preserving the files and volume label. Users do not need to enlarge small answer files themselves. This padding applies to generated answer CDs, not arbitrary source URLs.
+
+Answer syntax and boot commands belong to the installer: Debian Preseed, Ubuntu autoinstall, Rocky Kickstart and Windows Autounattend need different settings. Ubuntu's `cidata` CD is read by the installer itself; it is not a ZSphere userdata payload. Match CD device names/drive letters, disk partitioning and ISO labels to your media.
+
+## Build and cleanup
+
+1. Import or select the installer ISO, create a VM with a blank root disk, and attach any generated answer CD.
+2. Send boot commands and wait for the installer-configured SSH/WinRM connection.
+3. Run `installation_check_command`, stop the VM, detach both installation media, select hard-disk boot, and reconnect/check again.
+4. Run provisioners, stop the VM, create the root-volume template, wait for Ready and export when supported.
+5. Clean build-owned temporary resources. Existing installer images are retained; `keep_source_image = true` retains a URL-imported installer. Generated answer CDs are always cleaned.
+
+The two installation checks prevent an installer shell or VM Running status from being mistaken for a successful OS installation. Use the regular builder's API/readiness/cleanup timeouts and retention options; increase `image_ready_timeout` for large ISO imports. Cleanup errors include resource UUIDs for investigation.
+
+## Examples
+
+See the [ISO examples](https://github.com/ZSvirt/packer-plugin-zsvirty/tree/main/examples/iso) for runnable templates and answer files:
+
+| OS | Architecture / firmware | Connection |
+| --- | --- | --- |
+| Debian 13.7 | amd64 / BIOS and UEFI | SSH |
+| Ubuntu Server 24.04 LTS | amd64 / UEFI | SSH |
+| Rocky Linux 9.4 | ARM64 / UEFI | SSH |
+| Rocky Linux 9.4 | amd64 / BIOS and UEFI | SSH |
+| Windows Server 2022 | amd64 / UEFI | HTTPS WinRM |
+| Windows 11 24H2 | amd64 / UEFI with vTPM | HTTPS WinRM |
+
+The base answer-file fixtures were inherited from packer-plugin-zstack v1.2.1 and extended with ZSphere-specific examples. Upstream acceptance results do not establish ZSphere compatibility. Run the real-cloud acceptance suite against your target platform, network and storage before using the resulting images.
+
+For Windows optical boot, use `boot_menu_timeout = "20s"`, `boot_wait = "0s"`, and repeated space keys to cover the firmware's short input window. `platform = "WindowsVirtio"` explicitly selects VirtIO devices; use matching signed drivers. `cpu_mode = "host-model"` selects compatibility CPU mode, and `hyperv_enlightenments` controls the platform's Windows optimization setting. Windows 11 can use `tpm_key_provider_uuid` to create its vTPM using an existing key provider.
+
+Windows requires compatible signed VirtIO storage/network drivers. The example uses HTTPS WinRM and restricts its firewall rule to the runner. Rotate installation credentials and perform any required image generalization before distributing templates. Do not commit rendered answer files containing credentials.
+
+Windows examples set `shutdown_command = "shutdown.exe /s /t 10 /f"` and `shutdown_timeout = "10m"`. This shuts down inside the guest and waits for the platform to report Stopped before both ISO detachment and image creation. A successful API stop response alone does not prove that Windows flushed its registry; an interrupted shutdown can lose a newly created WinRM HTTPS listener and certificate.

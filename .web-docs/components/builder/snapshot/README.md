@@ -1,0 +1,28 @@
+
+Type: `zsvirt-snapshot`
+
+Convert an existing Enabled, Ready root-volume snapshot into a root-volume template. The source snapshot is retained. No VM is created, no SSH/WinRM connection is made, and provisioners are not executed. This builder does not create snapshots of existing VMs or capture their memory, additional disks or VM configuration.
+
+Available starting with v0.1.0. Existing `source "zsvirt"` configurations using `source_volume_snapshot_uuid` continue to work, with a deprecation warning in newer builds. Change the source type and build reference to migrate, and remove unused VM/communicator settings.
+
+```hcl
+source "zsvirt-snapshot" "base" {
+  # Authentication can be supplied through ZSVIRT_* environment variables.
+  source_volume_snapshot_uuid = "existing-root-snapshot-uuid"
+  image_storage_uuid        = "backup-storage-uuid"
+  image_name                 = "snapshot-image"
+  skip_export                = true
+}
+
+build {
+  sources = ["source.zsvirt-snapshot.base"]
+}
+```
+
+Required: `source_volume_snapshot_uuid`, `image_name`, and either `image_storage_uuid` or `image_storage_name`, plus valid ZSphere authentication.
+
+Optional output settings: `image_description`, `platform` (defaults to `Linux`), `architecture`, `guest_os_type`, `skip_export`, and `keep_image_on_error`. Set the platform explicitly for non-Linux snapshots. Export and cleanup behavior match the [ZSphere builder](/packer/integrations/ZSvirt/zsvirty/latest/components/builder/zsvirt).
+
+Timeouts: `api_timeout`, `image_ready_timeout`, and `cleanup_timeout`. Authentication uses the same `management_ip`, `port`, account/access-key fields and environment variables as the ZSphere builder.
+
+`communicator` defaults to `none` and accepts only `none`. VM, network, SSH/WinRM, ISO and userdata options are rejected. Do not attach provisioners to this source: there is no guest to provision. To customize the resulting image, use its UUID in a subsequent `zsvirt` build.

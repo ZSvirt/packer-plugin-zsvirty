@@ -1,0 +1,33 @@
+name: Test
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+      - uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe # v4.1.0
+        with:
+          go-version-file: .go-version
+      - name: Validate release configuration
+        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
+        with:
+          version: v2.18.3
+          args: check
+      - run: make test plugin-check
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3
+        with:
+          version: "1.16.1"
+      - name: Validate all three builder aliases with a local plugin
+        run: make plugin-smoke
+      - name: Check formatting, module graph, schema and web docs
+        run: |
+          test -z "$(gofmt -l builder version main.go)"
+          go mod tidy
+          bash .web-docs/scripts/test-compile-to-webdocs.sh
+          make generate
+          git diff --exit-code -- go.mod go.sum builder/zsvirt/config.hcl2spec.go builder/zsvirt/snapshot_builder.hcl2spec.go .web-docs

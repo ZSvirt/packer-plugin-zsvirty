@@ -1,0 +1,59 @@
+// Copyright ZStack.io, Inc. 2013, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package zsvirt
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+)
+
+type StepAttachGuestTools struct {
+}
+
+func (s *StepAttachGuestTools) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packersdk.Ui)
+	config := state.Get("config").(*Config)
+	driver := stepDriver(ctx, state)
+
+	instanceUuid := config.InstanceUuid
+	if instanceUuid == "" {
+		err := fmt.Errorf("instance UUID is required but not provided")
+		ui.Error(err.Error())
+		state.Put("error", err)
+		log.Printf("[ERROR] %v", err)
+		return multistep.ActionHalt
+	}
+
+	vm, err := driver.GetVmInstance(instanceUuid)
+	if err != nil {
+		ui.Error(fmt.Sprintf("Failed to get VM instance: %v", err))
+		log.Printf("[ERROR] Failed to get VM instance %s: %v", instanceUuid, err)
+		state.Put("error", err)
+		return multistep.ActionHalt
+	}
+
+	if vm == nil {
+		return halt(state, fmt.Errorf("empty VM inventory"))
+	}
+	ui.Say(fmt.Sprintf("Attaching guest tools to VM '%s'...", vm.Name))
+	log.Printf("[INFO] Attaching guest tools to VM '%s' (UUID: %s)", vm.Name, instanceUuid)
+
+	if err := driver.AttachGuestToolsToVm(instanceUuid); err != nil {
+		// Guest Tools is an enterprise feature — treat failure as non-fatal warning
+		ui.Say(fmt.Sprintf("Warning: failed to attach guest tools (non-fatal, skipping): %v", err))
+		log.Printf("[WARN] Failed to attach guest tools to VM %s: %v", instanceUuid, err)
+		return multistep.ActionContinue
+	}
+
+	ui.Say(fmt.Sprintf("Successfully attached guest tools to VM '%s'", vm.Name))
+	log.Printf("[INFO] Successfully attached guest tools to VM %s", instanceUuid)
+
+	return multistep.ActionContinue
+}
+
+func (s *StepAttachGuestTools) Cleanup(state multistep.StateBag) {}

@@ -1,0 +1,85 @@
+main
+packer-plugin-zsvirty
+**/packer_log*.txt
+**/git_*test.pkr.hcl
+crash.log
+
+dist/*
+.docs/*
+docs.zip
+settings.local.json
+.claude/settings.local.json
+.sysyhus/**
+.sisyphus/**
+# Local task and acceptance records
+docs/stories/
+docs/epic-*.md
+/docs/plans/
+/docs/tasks/
+/docs/reports/
+/bmad-output/
+/_bmad-output/
+examples/local-dev.pkr.hcl
+
+# locally built plugin binaries (packer init test layout)
+github.com/
+
+# local/private config
+.env
+.env.*
+!.env.example
+!.env.sample
+
+.zstack_smoke
+
+# editor/system local files
+.DS_Store
+.vscode/settings.json
+
+# private keys/certs
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.kubeconfig
+id_rsa
+id_ed25519
+credentials.json
+
+# Local acceptance-test outputs
+.acceptance/
+
+# Packer local variables can contain credentials and private resource IDs.
+*.pkrvars.hcl
+*.pkrvars.json
+!*.example.pkrvars.hcl
+!*.example.pkrvars.json
+!*.sample.pkrvars.hcl
+!*.sample.pkrvars.json
+.packer.d/
+packer_cache/
+output-*/
+
+# Logs, coverage and local language caches
+*.log
+*.test
+coverage.out
+coverage.html
+__pycache__/
+*.py[cod]
+.venv/
+
+# Downloaded/built media and rendered unattended-installation secrets
+*.iso
+*.qcow2
+*.raw
+*.vmdk
+*.vhd
+*.vhdx
+/examples/**/Autounattend.xml
+/examples/**/autounattend.xml
+/examples/**/preseed.cfg
+/examples/**/ks.cfg
+
+# Keep .web-docs/ and *.hcl2spec.go: CI verifies committed generated files.
