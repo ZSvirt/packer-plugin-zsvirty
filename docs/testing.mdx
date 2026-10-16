@@ -1,0 +1,75 @@
+# Testing
+
+Offline regression checks:
+
+```sh
+make test-coverage
+make plugin-check plugin-smoke PACKER=/path/to/packer
+bash .web-docs/scripts/test-compile-to-webdocs.sh
+make generate
+```
+
+The suite covers all three builder schemas, authentication and deprecated aliases,
+port-group priority and ordinary L3 fallback, HTTP contracts and cancellation,
+VM sizing and placement, snapshot/image lifecycle, data-disk cleanup, ISO answer
+media, firmware/boot sequencing, installation verification, and artifact retention.
+The plugin smoke test validates the actual three examples with account and AK/SK
+authentication and rejects conflicting credentials.
+
+Real-cloud tests create temporary resources. Put credentials and resource choices
+in a private `.env` (see `.env.example`); do not commit it or acceptance logs.
+The runner loads dotenv values without executing shell code.
+
+```sh
+make testacc SCENARIO=network
+make testacc SCENARIO=snapshot
+make testacc SCENARIO=cancel
+make testacc SCENARIO=export
+make testacc SCENARIO=aksk
+make testacc SCENARIO=offering
+make testacc SCENARIO=data-disk
+make testacc SCENARIO=ssh
+make testacc SCENARIO=key-cleanup
+make testacc SCENARIO=winrm
+make testacc SCENARIO=iso
+```
+
+- `network`: read-only SDK `QueryL3Network`, `GetL3Network`, and `QueryPortGroup` checks, compared with builder name/UUID lookup. Port groups share the L3 API identity; a separate legacy L3 resource is not required for this check.
+- `cloud`: root-template build; choose a source UUID or import URL.
+- `snapshot`: creates a snapshot of the owned temporary VM and runs the dedicated snapshot builder.
+- `cancel`: cancels provisioning and verifies VM cleanup.
+- `export`: probes the exported bytes; tests deletion only when output retention is disabled.
+- `aksk`: creates a disposable key under the configured account, builds with signed requests, and revokes that key.
+- `offering`: creates a disposable instance offering and builds by both its name and UUID.
+- `data-disk`: creates a disposable 1 GiB data-disk offering and verifies attachment and cleanup. Placement variables can select a host, cluster, or zone.
+- `ssh`, `winrm`: require a reachable guest and its own credentials. Platform login credentials are not guest credentials.
+- `key-cleanup`: requires a Linux cloud-init image, Python 3, and passwordless sudo; verifies temporary SSH-key removal.
+- `iso`: requires `ZSVIRT_ACC_ISO_CONFIG_FILE`, a private JSON builder configuration with OS-specific answer files. It verifies installation, hard-disk reboot, provisioning, and booting the generated template. `ZSVIRT_ACC_ISO_CREATE_DISK=1` supplies and cleans a temporary 64 GiB root-disk offering when none is configured.
+
+Set `ZSVIRT_ACC_KEEP_OUTPUTS=1` to keep generated images for manual verification.
+Temporary VMs, installer imports, answer CDs, keys, and offerings are still cleaned.
+Retained UUIDs appear as `RETAINED image UUID` in the private log.
+Do not claim export-deletion coverage for a retention-enabled run.
+
+An installer can read its unattended answer file from the auxiliary CD without
+guest access to an HTTP answer-file server. SSH/WinRM acceptance still requires
+connectivity from the Packer runner to the installed guest. This may be a routed
+private network; public Internet access is not required. With multiple NICs,
+ensure the guest configures the selected communicator network and its return
+route. Setting the platform's default network does not configure the guest OS.
+
+Use `--log-name` with `scripts/test-acceptance.py` for distinct OS runs.
+Logs and coverage are under the Git-ignored `.acceptance/` directory.
+An unavailable architecture, network, route, credential, or installer is a missing
+real-environment test prerequisite, not a passing test.
+
+ISO runs also write `<log-name>-timing.json` with actual step boundaries and completion status. Render a stage-by-stage comparison with:
+
+```sh
+python3 scripts/report-iso-timings.py .acceptance/*-timing.json
+```
+
+The report distinguishes total acceptance time from time to exported image, marks
+incomplete stages explicitly, and treats an existing ISO as reuse rather than an
+import. Preparation and cleanup overhead remain included in total time. Keep
+`skip_export = false` for a full export timing measurement.

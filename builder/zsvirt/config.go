@@ -1,0 +1,382 @@
+// Copyright ZStack.io, Inc. 2013, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package zsvirt
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
+	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/hashicorp/packer-plugin-sdk/template/interpolate"
+)
+
+const (
+	defaultImageReadyTimeout = 5 * time.Minute
+	defaultVmRunningTimeout  = 5 * time.Minute
+	defaultAPITimeout        = 30 * time.Minute
+	defaultCleanupTimeout    = 5 * time.Minute
+)
+
+//go:generate go tool packer-sdc mapstructure-to-hcl2 -type Config
+
+type Config struct {
+	ISOConfig              `mapstructure:",squash"`
+	common.PackerConfig    `mapstructure:",squash"`
+	commonsteps.HTTPConfig `mapstructure:",squash"`
+	Comm                   communicator.Config `mapstructure:",squash"`
+	AccessConfig           `mapstructure:",squash"`
+
+	ImageConfig    `mapstructure:",squash"`
+	NetworkConfig  `mapstructure:",squash"`
+	InstanceConfig `mapstructure:",squash"`
+
+	BackupStorageConfig `mapstructure:",squash"`
+	ExportImageResult   `mapstructure:",squash"`
+
+	ShutdownCommand      string `mapstructure:"shutdown_command"`
+	ShutdownTimeoutRaw   string `mapstructure:"shutdown_timeout"`
+	shutdownTimeout      time.Duration
+	APITimeoutRaw        string `mapstructure:"api_timeout"`
+	CleanupTimeoutRaw    string `mapstructure:"cleanup_timeout"`
+	KeepSourceImage      bool   `mapstructure:"keep_source_image"`
+	KeepImageOnError     bool   `mapstructure:"keep_image_on_error"`
+	SkipExport           bool   `mapstructure:"skip_export"`
+	apiTimeout           time.Duration
+	cleanupTimeout       time.Duration
+	CleanTraffic         bool   `mapstructure:"clean_traffic"`
+	ImageReadyTimeoutRaw string `mapstructure:"image_ready_timeout"`
+	VmRunningTimeoutRaw  string `mapstructure:"vm_running_timeout"`
+
+	imageReadyTimeout time.Duration
+	vmRunningTimeout  time.Duration
+
+	pollInterval time.Duration
+}
+
+func (c *Config) PollInterval() time.Duration {
+	if c.pollInterval > 0 {
+		return c.pollInterval
+	}
+	return 5 * time.Second
+}
+
+func (c *Config) ImageReadyTimeout() time.Duration {
+	if c.imageReadyTimeout > 0 {
+		return c.imageReadyTimeout
+	}
+	return defaultImageReadyTimeout
+}
+
+func (c *Config) VmRunningTimeout() time.Duration {
+	if c.vmRunningTimeout > 0 {
+		return c.vmRunningTimeout
+	}
+	return defaultVmRunningTimeout
+}
+
+type ImageConfig struct {
+	ImageName                string `mapstructure:"image_name"`
+	ImageDescription         string `mapstructure:"image_description"`
+	SourceImage              string `mapstructure:"source_image"`
+	GuestOsType              string `mapstructure:"guest_os_type"`
+	SourceImageUrl           string `mapstructure:"source_image_url"`
+	Format                   string `mapstructure:"format"`
+	ImageUuid                string `mapstructure:"image_uuid"`
+	Platform                 string `mapstructure:"platform"`
+	Architecture             string `mapstructure:"architecture"`
+	SourceVolumeSnapshotUuid string `mapstructure:"source_volume_snapshot_uuid"`
+}
+
+type NetworkConfig struct {
+	L3NetworkUuids       []string `mapstructure:"network_uuids"`
+	DefaultL3NetworkUuid string   `mapstructure:"default_network_uuid"`
+	L3NetworkName        string   `mapstructure:"network_name"`
+	L3NetworkUuid        string   `mapstructure:"network_uuid"`
+}
+
+type InstanceConfig struct {
+	ZoneUuid              string   `mapstructure:"zone_uuid"`
+	ClusterUuid           string   `mapstructure:"cluster_uuid"`
+	HostUuid              string   `mapstructure:"host_uuid"`
+	RootDiskOfferingUuid  string   `mapstructure:"root_disk_offering_uuid"`
+	DataDiskOfferingUuids []string `mapstructure:"data_disk_offering_uuids"`
+	InstanceName          string   `mapstructure:"instance_name"`
+	InstanceUuid          string   `mapstructure:"-" mapstructure-to-hcl2:",skip"`
+	InstanceOfferingName  string   `mapstructure:"instance_offering_name"`
+	InstanceOfferingUuid  string   `mapstructure:"instance_offering_uuid"`
+	SshKey                string   `mapstructure:"sshkey"`
+	UserData              string   `mapstructure:"userdata"`
+	RootVolumeUuid        string   `mapstructure:"-" mapstructure-to-hcl2:",skip"`
+	IP                    string   `mapstructure:"-" mapstructure-to-hcl2:",skip"`
+	MachineType           string   `mapstructure:"machine_type"`
+	CPUMode               string   `mapstructure:"cpu_mode"`
+	HyperVEnlightenments  *bool    `mapstructure:"hyperv_enlightenments"`
+	TPMKeyProviderUUID    string   `mapstructure:"tpm_key_provider_uuid"`
+	CPUVendor             string   `mapstructure:"cpu_vendor"`
+	CPUNum                int64    `mapstructure:"cpu_num"`
+	MemorySize            int64    `mapstructure:"memory_size"`
+}
+
+type BackupStorageConfig struct {
+	LegacyBackupStorageUuid string `mapstructure:"backup_storage_uuid"`
+	LegacyBackupStorageName string `mapstructure:"backup_storage_name"`
+	BackupStorageUuid       string `mapstructure:"image_storage_uuid"`
+	BackupStorageName       string `mapstructure:"image_storage_name"`
+}
+
+type ExportImageResult struct {
+	ImageUrl string `mapstructure:"-" mapstructure-to-hcl2:",skip"`
+	Success  bool   `mapstructure:"-" mapstructure-to-hcl2:",skip"`
+}
+
+func (c *Config) RedactedSummary() string {
+	authMode := "none"
+	switch {
+	case c.AccountName != "" || c.AccountPassword != "":
+		authMode = "account"
+	case c.AccessKeyId != "" || c.AccessKeySecret != "":
+		authMode = "access_key"
+	}
+
+	return fmt.Sprintf(
+		"host=%q auth_mode=%s communicator=%q image_name=%q source_image=%q source_image_url_set=%t instance_name=%q network_name=%q network_uuid_set=%t instance_offering_name=%q instance_offering_uuid_set=%t image_storage_name=%q image_storage_uuid_set=%t ssh_host=%q ssh_port=%d ssh_username=%q ssh_password_set=%t ssh_private_key_file_set=%t user_data_set=%t packer_debug=%t",
+		c.Host,
+		authMode,
+		c.Comm.Type,
+		c.ImageName,
+		c.SourceImage,
+		c.SourceImageUrl != "",
+		c.InstanceName,
+		c.L3NetworkName,
+		c.L3NetworkUuid != "",
+		c.InstanceOfferingName,
+		c.InstanceOfferingUuid != "",
+		c.BackupStorageName,
+		c.BackupStorageUuid != "",
+		c.Comm.SSHHost,
+		c.Comm.SSHPort,
+		c.Comm.SSHUsername,
+		c.Comm.SSHPassword != "",
+		c.Comm.SSHPrivateKeyFile != "",
+		c.UserData != "",
+		c.PackerDebug,
+	)
+}
+
+func (c *Config) Prepare(raws ...any) error {
+	err := config.Decode(c, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &c.ctx,
+		InterpolateFilter:  &interpolate.RenderFilter{Exclude: []string{"boot_command"}},
+	}, raws...)
+	if err != nil {
+		log.Printf("[ERROR] Failed to decode configuration: %v", err)
+		return err
+	}
+
+	var errs *packersdk.MultiError
+
+	for _, alias := range []struct {
+		value             *string
+		legacy, name, old string
+	}{
+		{&c.BackupStorageUuid, c.LegacyBackupStorageUuid, "image_storage_uuid", "backup_storage_uuid"},
+		{&c.BackupStorageName, c.LegacyBackupStorageName, "image_storage_name", "backup_storage_name"},
+	} {
+		if err := resolveAlias(alias.value, alias.legacy, alias.name, alias.old); err != nil {
+			errs = packersdk.MultiErrorAppend(errs, err)
+		}
+	}
+	c.AccessConfig.applyEnvDefaults()
+	for _, accessErr := range c.AccessConfig.validateCredentials() {
+		errs = packersdk.MultiErrorAppend(errs, accessErr)
+	}
+
+	if c.SourceImageUrl != "" {
+		log.Print("[INFO] Configuring source image from URL")
+		if c.Format == "" {
+			c.Format = "qcow2"
+			if c.ISOInstall {
+				c.Format = "iso"
+			}
+			log.Printf("[DEBUG] Default image format set to: %s", c.Format)
+		}
+		if c.Platform == "" {
+			c.Platform = "Linux"
+			log.Printf("[DEBUG] Default platform set to: %s", c.Platform)
+		}
+		if c.SourceImage == "" {
+			errs = packersdk.MultiErrorAppend(errs, errors.New("source image name must be specified when using source_image_url"))
+		}
+	}
+
+	if c.BackupStorageConfig.BackupStorageUuid == "" && c.BackupStorageConfig.BackupStorageName == "" {
+		errs = packersdk.MultiErrorAppend(errs, errors.New("image_storage_name or image_storage_uuid is required"))
+	}
+
+	if c.SourceVolumeSnapshotUuid != "" {
+		log.Printf("[INFO] Configuring image creation from volume snapshot: %s", c.SourceVolumeSnapshotUuid)
+		if c.ImageName == "" {
+			errs = packersdk.MultiErrorAppend(errs, errors.New("image_name must be specified when using source_volume_snapshot_uuid"))
+		}
+		if c.Platform == "" {
+			c.Platform = "Linux"
+			log.Printf("[DEBUG] Default platform set to: %s", c.Platform)
+		}
+	}
+
+	if c.ImageReadyTimeoutRaw != "" {
+		d, err := time.ParseDuration(c.ImageReadyTimeoutRaw)
+		if err != nil {
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("image_ready_timeout is invalid: %v", err))
+		} else if d <= 0 {
+			errs = packersdk.MultiErrorAppend(errs, errors.New("image_ready_timeout must be positive"))
+		} else {
+			c.imageReadyTimeout = d
+		}
+	}
+	if c.VmRunningTimeoutRaw != "" {
+		d, err := time.ParseDuration(c.VmRunningTimeoutRaw)
+		if err != nil {
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("vm_running_timeout is invalid: %v", err))
+		} else if d <= 0 {
+			errs = packersdk.MultiErrorAppend(errs, errors.New("vm_running_timeout must be positive"))
+		} else {
+			c.vmRunningTimeout = d
+		}
+	}
+
+	if c.ShutdownCommand != "" && c.Comm.Type == "none" {
+		errs = packersdk.MultiErrorAppend(errs, errors.New("shutdown_command requires ssh or winrm communicator"))
+	}
+
+	for _, e := range c.prepareISO() {
+		errs = packersdk.MultiErrorAppend(errs, e)
+	}
+	for _, e := range c.validateBuild() {
+		errs = packersdk.MultiErrorAppend(errs, e)
+	}
+	for _, setting := range []struct {
+		name, raw string
+		target    *time.Duration
+	}{
+		{"shutdown_timeout", c.ShutdownTimeoutRaw, &c.shutdownTimeout},
+		{"api_timeout", c.APITimeoutRaw, &c.apiTimeout}, {"cleanup_timeout", c.CleanupTimeoutRaw, &c.cleanupTimeout},
+	} {
+		if setting.raw == "" {
+			continue
+		}
+		d, e := time.ParseDuration(setting.raw)
+		if e != nil || d <= 0 {
+			errs = packersdk.MultiErrorAppend(errs, fmt.Errorf("%s must be a positive duration", setting.name))
+		} else {
+			*setting.target = d
+		}
+	}
+	if errs != nil && len(errs.Errors) > 0 {
+		log.Printf("[ERROR] Configuration validation failed with %d error(s)", len(errs.Errors))
+		return errs
+	}
+
+	log.Printf("[INFO] Configuration prepared successfully")
+	return nil
+
+}
+
+func (c *Config) APITimeout() time.Duration {
+	if c.apiTimeout > 0 {
+		return c.apiTimeout
+	}
+	return defaultAPITimeout
+}
+func (c *Config) CleanupTimeout() time.Duration {
+	if c.cleanupTimeout > 0 {
+		return c.cleanupTimeout
+	}
+	return defaultCleanupTimeout
+}
+func (c *Config) validateBuild() []error {
+	var errs []error
+	add := func(msg string) { errs = append(errs, errors.New(msg)) }
+	if c.ImageName == "" {
+		add("image_name is required")
+	}
+	if c.SourceVolumeSnapshotUuid != "" {
+		if c.SourceImage != "" || c.SourceImageUrl != "" || c.ImageUuid != "" {
+			add("source_volume_snapshot_uuid cannot be combined with another image source")
+		}
+		if c.Comm.Type != "" && c.Comm.Type != "none" {
+			add("snapshot builds require communicator = none")
+		}
+		return errs
+	}
+	if c.SourceImage == "" && c.ImageUuid == "" {
+		add("source_image or image_uuid is required")
+	}
+	if c.SourceImageUrl != "" && c.ImageUuid != "" {
+		add("source_image_url cannot be combined with image_uuid")
+	}
+	if c.InstanceName == "" {
+		add("instance_name is required")
+	}
+	if c.L3NetworkName == "" && c.L3NetworkUuid == "" && len(c.L3NetworkUuids) == 0 {
+		add("network_name, network_uuid or network_uuids is required")
+	}
+	if len(c.L3NetworkUuids) > 0 && (c.L3NetworkName != "" || c.L3NetworkUuid != "") {
+		add("network_uuids cannot be combined with network_name or network_uuid")
+	}
+	seen := map[string]bool{}
+	for _, id := range c.L3NetworkUuids {
+		if id == "" || seen[id] {
+			add("network_uuids must contain unique non-empty UUIDs")
+		}
+		seen[id] = true
+	}
+	if c.DefaultL3NetworkUuid != "" && !seen[c.DefaultL3NetworkUuid] && c.DefaultL3NetworkUuid != c.L3NetworkUuid {
+		add("default_network_uuid must belong to the configured networks")
+	}
+	if c.MachineType != "" && c.MachineType != "pc" && c.MachineType != "q35" {
+		add("machine_type must be pc or q35")
+	}
+	if c.TPMKeyProviderUUID != "" && c.BootMode != "UEFI" {
+		add("tpm_key_provider_uuid requires boot_mode UEFI")
+	}
+	if c.CPUVendor != "" && c.CPUVendor != "None" && c.CPUVendor != "AuthenticAMD" {
+		add("cpu_vendor must be None or AuthenticAMD")
+	}
+	if c.CPUMode != "" && c.CPUMode != "none" && c.CPUMode != "host-model" && c.CPUMode != "host-passthrough" {
+		add("cpu_mode must be none, host-model or host-passthrough")
+	}
+	if c.CPUNum < 0 || c.CPUNum > 2147483647 {
+		add("cpu_num must be between 1 and 2147483647 when configured")
+	}
+	if c.MemorySize < 0 || c.MemorySize > 8796093022207 {
+		add("memory_size is outside the supported MiB range")
+	}
+	if c.InstanceOfferingName == "" && c.InstanceOfferingUuid == "" && (c.CPUNum <= 0 || c.MemorySize <= 0) {
+		add("instance_offering_name/uuid or positive cpu_num and memory_size is required")
+	}
+	if (c.InstanceOfferingName != "" || c.InstanceOfferingUuid != "") && (c.CPUNum != 0 || c.MemorySize != 0) {
+		add("instance offering cannot be combined with cpu_num/memory_size")
+	}
+	for _, id := range c.DataDiskOfferingUuids {
+		if id == "" {
+			add("data_disk_offering_uuids cannot contain empty UUIDs")
+		}
+	}
+	return errs
+}
+
+func (c *Config) ShutdownTimeout() time.Duration {
+	if c.shutdownTimeout > 0 {
+		return c.shutdownTimeout
+	}
+	return 5 * time.Minute
+}

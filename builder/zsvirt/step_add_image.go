@@ -1,0 +1,97 @@
+// Copyright ZStack.io, Inc. 2013, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package zsvirt
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/terraform-zstack-modules/zsphere-sdk-go/pkg/param"
+)
+
+type StepAddImage struct {
+}
+
+func (s *StepAddImage) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packersdk.Ui)
+	config := state.Get("config").(*Config)
+	ctx, cancel := context.WithTimeout(ctx, config.ImageReadyTimeout())
+	defer cancel()
+	driver := stepDriver(ctx, state)
+
+	if config.SourceImageUrl == "" || config.SourceImage == "" {
+		err := fmt.Errorf("source image URL or name is empty")
+		ui.Error(err.Error())
+		log.Printf("[ERROR] %v", err)
+		state.Put("error", err)
+		return multistep.ActionHalt
+	}
+
+	ui.Say("Starting image addition process...")
+	log.Printf("[INFO] Adding source image %q", config.SourceImage)
+
+	description := config.ImageDescription
+	if description == "" {
+		description = "Image added via Packer build process"
+	}
+
+	imageParam := param.AddImageParam{
+		BaseParam: param.BaseParam{},
+		Params: param.AddImageParamDetail{
+			Name:         config.SourceImage,
+			Description:  &description,
+			Url:          config.SourceImageUrl,
+			MediaType:    strPtr("RootVolumeTemplate"),
+			Architecture: optionalString(config.Architecture),
+			GuestOsType:  strPtr(config.GuestOsType),
+			System:       false,
+			Format:       strPtr(config.Format),
+			Platform:     strPtr(config.Platform),
+		},
+	}
+	if config.BackupStorageUuid != "" {
+		imageParam.Params.BackupStorageUuids = []string{config.BackupStorageUuid}
+	}
+
+	if config.ISOInstall {
+		imageParam.Params.MediaType = strPtr("ISO")
+	}
+	if config.BootMode != "" {
+		imageParam.SystemTags = append(imageParam.SystemTags, "bootMode::"+config.BootMode)
+	}
+	r := resources(state)
+	r.ImportedImage = newResource()
+	imageParam.Params.ResourceUuid = &r.ImportedImage.UUID
+	img, err := driver.AddImage(imageParam)
+	if err != nil {
+		err = fmt.Errorf("failed to add image: %v", err)
+		ui.Error(err.Error())
+		log.Printf("[ERROR] %v", err)
+		state.Put("error", err)
+		return multistep.ActionHalt
+	}
+
+	if img == nil || img.UUID == "" {
+		return halt(state, fmt.Errorf("image creation returned empty inventory"))
+	}
+	r.ImportedImage.UUID = img.UUID
+	r.ImportedImage.Created = true
+
+	ui.Say(fmt.Sprintf("Successfully added image '%s' (UUID: %s)", config.SourceImage, img.UUID))
+	log.Printf("[INFO] Image added successfully with UUID: %s", img.UUID)
+
+	config.ImageUuid = img.UUID
+
+	return multistep.ActionContinue
+}
+
+func (s *StepAddImage) Cleanup(state multistep.StateBag) {
+	config := state.Get("config").(*Config)
+	if !config.KeepSourceImage {
+		cleanupImage(state, &resources(state).ImportedImage)
+	}
+}

@@ -1,0 +1,177 @@
+// Copyright ZStack.io, Inc. 2013, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package zsvirt
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"log"
+	"strings"
+
+	"github.com/ZSvirt/packer-plugin-zsvirty/builder/zsvirt/utils"
+	"github.com/hashicorp/packer-plugin-sdk/multistep"
+	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"github.com/terraform-zstack-modules/zsphere-sdk-go/pkg/param"
+)
+
+type StepCreateVMInstance struct{}
+
+func strPtr(s string) *string {
+	return &s
+}
+
+func (s *StepCreateVMInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packersdk.Ui)
+	config := state.Get("config").(*Config)
+	ctx, cancel := context.WithTimeout(ctx, config.VmRunningTimeout())
+	defer cancel()
+	driver := stepDriver(ctx, state)
+
+	ui.Say(fmt.Sprintf("Creating VM instance '%s'...", config.InstanceName))
+
+	var systemtags []string
+	if config.HyperVEnlightenments != nil {
+		systemtags = append(systemtags, fmt.Sprintf("resourceConfig::vm::emulateHyperV::%t", *config.HyperVEnlightenments))
+	}
+	if config.MachineType != "" {
+		systemtags = append(systemtags, "vmMachineType::"+config.MachineType)
+	}
+	if config.CPUVendor != "" {
+		systemtags = append(systemtags, "resourceConfig::vm::vm.cpuid.vendor::"+config.CPUVendor)
+	}
+	if config.CPUMode != "" {
+		systemtags = append(systemtags, "resourceConfig::kvm::vm.cpuMode::"+config.CPUMode)
+	}
+	if config.BootMenuTimeout > 0 {
+		systemtags = append(systemtags, fmt.Sprintf("resourceConfig::vm::bootMenuSplashTimeout::%d", config.BootMenuTimeout.Milliseconds()))
+	}
+	if config.BootMode != "" {
+		systemtags = append(systemtags, "bootMode::"+config.BootMode)
+	}
+	cdroms := "cdroms::Empty::None::None"
+	if config.ISOInstall {
+		aux := "Empty"
+		if id, ok := state.Get("answer_iso_uuid").(string); ok && id != "" {
+			aux = id
+		}
+		cdroms = fmt.Sprintf("cdroms::%s::%s::None", config.ImageUuid, aux)
+	}
+	systemtags = append(systemtags, cdroms, fmt.Sprintf("cleanTraffic::%t", config.CleanTraffic))
+	if config.SshKey != "" && !config.ISOInstall {
+		systemtags = append(systemtags, fmt.Sprintf("sshkey::%s", config.SshKey))
+	}
+	if config.UserData != "" && !config.ISOInstall {
+		systemtags = append(systemtags, fmt.Sprintf("userdata::%s", encodeUserData(config.UserData)))
+	}
+
+	createVmInstanceParam := param.CreateVmInstanceParam{
+		BaseParam: param.BaseParam{
+			SystemTags: systemtags,
+		},
+		Params: param.CreateVmInstanceParamDetail{
+			Name:           config.InstanceName,
+			Description:    strPtr("Auto created by packer-plugin-zsvirty"),
+			ImageUuid:      strPtr(config.ImageUuid),
+			L3NetworkUuids: []string{config.L3NetworkUuid},
+		},
+	}
+
+	if config.GuestOsType != "" {
+		createVmInstanceParam.Params.GuestOsType = strPtr(config.GuestOsType)
+	}
+
+	if config.Platform != "" {
+		createVmInstanceParam.Params.Platform = strPtr(config.Platform)
+		if config.Platform == "WindowsVirtio" {
+			virtio := true
+			createVmInstanceParam.Params.Virtio = &virtio
+		}
+	}
+
+	if config.InstanceOfferingUuid != "" {
+		createVmInstanceParam.Params.InstanceOfferingUuid = strPtr(config.InstanceOfferingUuid)
+	} else {
+		if config.CPUNum > 0 {
+			cpuNum := int(config.CPUNum)
+			createVmInstanceParam.Params.CpuNum = &cpuNum
+		}
+		if config.MemorySize > 0 {
+			memSize := utils.MiBToBytes(config.MemorySize)
+			createVmInstanceParam.Params.MemorySize = &memSize
+		}
+	}
+
+	if config.ISOInstall {
+		createVmInstanceParam.Params.Strategy = strPtr("CreateStopped")
+	}
+	r := resources(state)
+	r.VM = newResource()
+	createVmInstanceParam.Params.ResourceUuid = &r.VM.UUID
+	if len(config.L3NetworkUuids) > 0 {
+		createVmInstanceParam.Params.L3NetworkUuids = config.L3NetworkUuids
+	}
+	if config.DefaultL3NetworkUuid != "" {
+		createVmInstanceParam.Params.DefaultL3NetworkUuid = &config.DefaultL3NetworkUuid
+	}
+	if config.ZoneUuid != "" {
+		createVmInstanceParam.Params.ZoneUuid = &config.ZoneUuid
+	}
+	if config.ClusterUuid != "" {
+		createVmInstanceParam.Params.ClusterUuid = &config.ClusterUuid
+	}
+	if config.HostUuid != "" {
+		createVmInstanceParam.Params.HostUuid = &config.HostUuid
+	}
+	if config.RootDiskOfferingUuid != "" {
+		createVmInstanceParam.Params.RootDiskOfferingUuid = &config.RootDiskOfferingUuid
+	}
+	createVmInstanceParam.Params.DataDiskOfferingUuids = config.DataDiskOfferingUuids
+	ui.Say(fmt.Sprintf("Tracking VM resource UUID: %s", r.VM.UUID))
+	instance, err := driver.CreateVmInstance(createVmInstanceParam, config.TPMKeyProviderUUID)
+	if err != nil {
+		ui.Error(fmt.Sprintf("Failed to create VM instance: %v", err))
+		log.Printf("[ERROR] Failed to create VM instance: %v", err)
+		state.Put("error", err)
+		return multistep.ActionHalt
+	}
+
+	if instance == nil || instance.UUID == "" {
+		return halt(state, fmt.Errorf("CreateVmInstance returned empty inventory"))
+	}
+	r.VM.UUID = instance.UUID
+	r.VM.Created = true
+	for _, v := range instance.AllVolumes {
+		if v.Type == "Data" {
+			r.DataVolumes = append(r.DataVolumes, ownedResource{UUID: v.UUID, Created: true})
+		}
+	}
+	config.InstanceUuid = instance.UUID
+	state.Put("instance_id", instance.UUID)
+	config.RootVolumeUuid = instance.RootVolumeUuid
+	// A port group using external DHCP may report its IP only after boot.
+	// Keep explicit communicator hosts untouched and wait before connecting.
+	config.IP = selectVMIP(config, instance)
+	log.Printf("[INFO] Successfully created VM instance (UUID: %s, IP: %s)", instance.UUID, config.IP)
+	ui.Say(fmt.Sprintf("Successfully created VM instance '%s' (UUID: %s, IP: %s)",
+		config.InstanceName, instance.UUID, config.IP))
+
+	return multistep.ActionContinue
+}
+
+func (s *StepCreateVMInstance) Cleanup(state multistep.StateBag) { cleanupVM(state) }
+
+// encodeUserData returns the user data as base64. Input is always treated as
+// plaintext. Callers that already hold base64-encoded content must decode it
+// before passing it in.
+func encodeUserData(raw string) string {
+	return base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(raw)))
+}
+
+func optionalString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}

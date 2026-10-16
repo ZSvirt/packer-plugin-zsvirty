@@ -1,0 +1,192 @@
+
+Type: `zsvirt`
+
+Creates a root-volume template from a provisioned VM. For direct conversion of an existing root-volume snapshot, use the [ZSphere Snapshot builder](/packer/integrations/ZSvirt/zsvirty/latest/components/builder/snapshot). For unattended operating-system installation from ISO, use the [ZSphere ISO builder](/packer/integrations/ZSvirt/zsvirty/latest/components/builder/iso).
+
+
+<!-- Builder Configuration Fields -->
+
+**Required**
+
+- `management_ip` (string) - Management node IP for either ZSphere or ZSVirt.
+
+
+<!--
+  Optional Configuration Fields
+
+  Configuration options that are not required or have reasonable defaults
+  should be listed under the optionals section. Defaults values should be
+  noted in the description of the field
+-->
+
+**Optional**
+
+- `access_key_id` (String) AccessKey ID for ZSphere API. Create AccessKey ID from MN,  Operational Management->Access Control->AccessKey Management. May also be provided via ZSVIRT_ACCESS_KEY_ID environment variable. Required if using AccessKey authentication. Mutually exclusive with `account_name` and `account_password`.
+- `access_key_secret` (String, Sensitive) AccessKey Secret for ZSphere API. May also be provided via ZSVIRT_ACCESS_KEY_SECRET environment variable. Required if using AccessKey authentication. Mutually exclusive with `account_name` and `account_password`.
+- `account_name` (String) Username for ZSphere API. May also be provided via ZSVIRT_ACCOUNT_NAME environment variable. Required if using Account authentication.  Only supports the platform administrator account (`admin`). Mutually exclusive with `access_key_id` and `access_key_secret`. Using `access_key_id` and `access_key_secret` is the recommended approach for authentication, as it provides more flexibility and security.
+- `account_password` (String, Sensitive) Password for ZSphere API. May also be provided via ZSVIRT_ACCOUNT_PASSWORD environment variable.Required if using Account authentication.  Only supports the platform administrator account (`admin`). Mutually exclusive with `access_key_id` and `access_key_secret`. Using `access_key_id` and `access_key_secret` is the recommended approach for authentication, as it provides more flexibility and security.
+- `port` (Number) ZSphere Cloud MN API port. May also be provided via ZSVIRT_PORT environment variable.
+
+
+**Image Parameters**
+
+- `source_image` (String) - Name of the source image used to create VM instance.
+
+- `image_uuid` (String) - UUID of the source image. When provided, skips name-based image lookup.
+
+- `source_image_url` (String) - URL of the source image, supports HTTP/HTTPS protocols.
+
+- `format` (String) - Image format, supports formats like "qcow2", "raw", etc.
+
+- `platform` (String) - Operating system platform type, such as "Linux", "Windows", etc.
+
+- `guest_os_type` (String) - Guest OS type, such as "Ubuntu", "CentOS", etc.
+
+- `architecture` (String) - CPU architecture of the image, such as "x86_64", "aarch64".
+
+- `image_name` (String) - Name of the target image to be created.
+
+- `image_description` (String) - Description for the created image. Defaults to the image name if not set.
+
+- `source_volume_snapshot_uuid` (String, deprecated on this builder) - UUID of an existing ZSphere volume snapshot. When set, the builder creates a root volume template from that existing snapshot and skips VM creation, SSH connection, and provisioners. Requires `image_name` and one of `image_storage_name` / `image_storage_uuid`.
+
+**Network Parameters**
+
+- `network_name` (String) - Port-group name (preferred), falling back to an ordinary L3 network when there is no match or the port-group endpoint is unsupported (HTTP 404/405/501). Ambiguous names require UUIDs. A port group wins over an ordinary L3 network with the same name. Other API errors are returned.
+
+- `network_uuid` (String) - Port-group or L3-network UUID; skips name lookup.
+- `network_uuids` (List of String) - Multiple port-group or L3-network UUIDs; mutually exclusive with `network_name` / `network_uuid`.
+- `default_network_uuid` (String) - Connection/default NIC, which must belong to the configured networks.
+
+The plugin waits for the selected NIC IP before SSH/WinRM, including after an ISO reboot, bounded by `vm_running_timeout`. Otherwise it prefers the VM default network and then the first usable NIC if no default is reported. Use `ssh_host` / `winrm_host` when external DHCP or a static address cannot be reported by the platform. Existing network field names are retained for compatibility.
+
+**Instance Parameters**
+
+- `instance_offering_name` (String) - Computing specification name that defines VM resources like CPU and memory.
+
+- `instance_offering_uuid` (String) - UUID of the instance offering. When provided, skips name-based lookup.
+
+- `hyperv_enlightenments` (bool) - Optional per-VM Hyper-V optimizations for Windows guests (`vm.emulateHyperV`). An unset value preserves the platform default; use `true` when matching a known-good Windows VM configuration.
+
+- `tpm_key_provider_uuid` (string) - Optional existing ZSphere key provider UUID. Creates a vTPM with the VM; requires `boot_mode = "UEFI"` and platform vTPM support. The provider remains external and is never deleted by the plugin. When launching Windows 11 from the resulting image, configure a new vTPM for that VM too.
+
+- `cpu_vendor` (string) - Optional per-VM CPU vendor override: `None` disables vendor spoofing; `AuthenticAMD` selects the platform AMD vendor override. Omit to inherit the platform setting. Use only when matching the CPU requirements of your guest and nested hypervisor; it is not a universal Windows boot fix.
+
+- `cpu_mode` (string) - Optional virtual CPU mode: `none`, `host-model`, or `host-passthrough`. Use `host-model` when a modern guest requires CPU features hidden by the default virtual CPU; an unset value preserves the platform default.
+
+- `cpu_num` (Number) - Number of CPU cores for the VM instance. Use instead of instance_offering_name for custom sizing.
+
+- `memory_size` (Number) - Memory size in MiB for the VM instance. Use instead of instance_offering_name for custom sizing.
+
+- `instance_name` (String) - Name of the VM instance to be created.
+
+**Storage Parameters**
+- `image_storage_name` (String) - Name of the image storage for storing created images.
+
+- `image_storage_uuid` (String) - UUID of the image storage. Required for storing and exporting the created image.
+
+**SSH Parameters**
+- `ssh_username` (String) - SSH username for connecting to the created VM instance.
+
+- `ssh_password` (String) - SSH password for authentication.
+
+<!--
+  A basic example on the usage of the builder. Multiple examples
+  can be provided to highlight various build configurations.
+
+-->
+### Example Usage
+
+In the normal VM build path, the builder provisions the VM, stops it, and creates the final image directly from the stopped root volume.
+
+```hcl
+source "zsvirt" "example" {
+  management_ip       = "192.0.2.10"
+  access_key_id     = env("ZSVIRT_ACCESS_KEY_ID")
+  access_key_secret = env("ZSVIRT_ACCESS_KEY_SECRET")
+
+  source_image     = "ubuntu-22.04-from-url"
+  source_image_url = "http://mirrors.example.com/images/ubuntu-22.04-server.qcow2"
+  format           = "qcow2"
+  platform         = "Linux"
+  guest_os_type    = "Ubuntu"
+
+  network_name        = "build-port-group"
+  cpu_num             = 2
+  memory_size         = 4096
+  image_storage_name = "local-backup"
+
+  instance_name     = "packer-example"
+  image_name        = "packer-example-image"
+  image_description = "Built with Packer using AK/SK authentication"
+
+  ssh_username = "root"
+  ssh_password = "your-ssh-password"
+}
+
+```
+
+### Example: Build From Volume Snapshot
+
+Use `zsvirt-snapshot` to convert an existing root-volume snapshot. The default `zsvirt` builder also accepts the same snapshot parameter for compatibility. No VM is created and provisioners are not executed:
+
+```hcl
+source "zsvirt-snapshot" "from_snapshot" {
+  management_ip      = "192.0.2.10"
+  account_name     = env("ZSVIRT_ACCOUNT_NAME")
+  account_password = env("ZSVIRT_ACCOUNT_PASSWORD")
+
+  source_volume_snapshot_uuid = "snapshot-uuid-here"
+
+  image_name          = "packer-from-snapshot-image"
+  image_description   = "Built from ZSphere volume snapshot"
+  platform            = "Linux"
+  architecture        = "x86_64"
+  image_storage_name = "local-backup"
+}
+
+build {
+  sources = ["source.zsvirt-snapshot.from_snapshot"]
+}
+```
+
+## Lifecycle, timeouts and optional placement
+
+See the [configuration guide](https://github.com/ZSvirt/packer-plugin-zsvirty#quick-start) and [examples](https://github.com/ZSvirt/packer-plugin-zsvirty/tree/main/examples) for setup and usage.
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `shutdown_command` | empty | Optional guest command to shut down through SSH/WinRM before imaging; empty uses the platform graceful-stop API |
+| `shutdown_timeout` | `5m` | Deadline for the guest shutdown command and waiting for Stopped; no forced-stop fallback |
+| `api_timeout` | `30m` | Deadline per API operation, including job polling |
+| `cleanup_timeout` | `5m` | Independent deadline for cleanup after success, failure or cancellation |
+| `image_ready_timeout` | `5m` | Image creation/import and readiness wait deadlines |
+| `vm_running_timeout` | `5m` | VM creation, running-state and IP discovery deadlines |
+| `keep_source_image` | `false` | Retain a source image imported by this build |
+| `keep_image_on_error` | `false` | Retain an output image on build failure |
+| `skip_export` | `false` | Keep the cloud image without requesting an export URL |
+| `network_uuids` | unset | Multiple port-group or L3-network UUIDs; exclusive with singular network selectors |
+| `default_network_uuid` | unset | Default NIC; must belong to the selected networks |
+| `zone_uuid`, `cluster_uuid`, `host_uuid` | unset | Optional VM placement constraints |
+| `root_disk_offering_uuid` | unset | Optional root disk offering |
+| `boot_mode` | unset | `Legacy` or `UEFI`; when unset, use the image/cloud default |
+| `data_disk_offering_uuids` | unset | Data disks created with the VM, cleaned after the build |
+
+Set `communicator = "ssh"` or `"winrm"` and supply credentials for the source image. If using automatic SSH key injection, the source image must support the required cloud-init metadata and key cleanup. Set `ssh_clear_authorized_keys = true` to remove the temporary public key from the guest before image creation; existing private-key and SSH-agent authentication are preserved. ISO installation configures credentials through the installer answer file instead.
+
+Increase `image_ready_timeout` for large imports or image transfers. Only explicit unsupported-export errors are downgraded to warnings; permission and storage errors fail the build. Snapshot builds require an Enabled/Ready root-volume snapshot and `communicator = "none"`.
+
+Only the root volume is included in the output template. Existing source resources are never cleaned. A failed or cancelled build returns no artifact. Artifact `Files()` is empty; use `Id()` / `State("image_uuid")`, `State("image_url")`, `State("image_storage_uuid")`, and `State("cleanup_warnings")` for metadata. Inspect UUIDs in cleanup warnings because server-side creation may complete after local cancellation.
+
+Use `management_ip` for the management node IP and `image_storage_name` / `image_storage_uuid` for Image Storage. Deprecated aliases `zstack_host`, `backup_storage_name` and `backup_storage_uuid` remain supported; canonical and legacy values must agree if both are supplied.
+Explicit HCL takes precedence over `ZSVIRT_*`, then `ZSPHERE_*`, then `ZSTACK_*`. The IP variable is `ZSVIRT_MANAGEMENT_IP`, with `ZSPHERE_HOST` / `ZSTACK_HOST` fallbacks; port and authentication use the same suffixes across namespaces. Credentials are selected as a whole group; incomplete groups fail validation and are never combined across sources.
+Image Storage has no automatic dedicated environment defaults. Declare HCL variables and use `PKR_VAR_image_storage_name` or `PKR_VAR_image_storage_uuid` to supply these values.
+Image and ISO builds accept either `instance_offering_name` / `instance_offering_uuid`, or both positive integers `cpu_num` and `memory_size`. These modes are mutually exclusive. Memory is in MiB: `2048` means 2 GiB. Snapshot builds do not need VM sizing.
+
+`boot_menu_timeout` optionally sets the firmware boot-menu splash duration (for example `"20s"`, maximum `"10m"`). This is separate from `boot_wait`, which delays Packer keystrokes after the start API returns. Windows ISO templates can combine a longer firmware splash, `boot_wait = "0s"` and repeated space keys to cover the optical-media boot prompt.
+
+`machine_type` optionally selects the x86 virtual chipset (`pc` or `q35`).
+Omit it to use the platform default. Use `q35` when the guest or UEFI firmware
+requires it; this does not install or upgrade host firmware.
+
+For `platform = "WindowsVirtio"`, the VM create request explicitly enables VirtIO devices. Supply matching Windows storage/network drivers on the answer CD. `platform = "Windows"` retains the platform's standard device choice.
